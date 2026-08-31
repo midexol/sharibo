@@ -1111,6 +1111,52 @@ fn instance_ttl_extended_after_create_fund_claim() {
     assert_eq!(circle.round, 1, "claim should have advanced round to 1");
 }
 
+#[test]
+fn nullifier_fence_survives_ttl_expiry() {
+    // Regression test for issue #254:
+    // Nullifier storage entries embedded inside the Circle struct inherit the
+    // Circle's continuously-extended TTL. When the ledger advances past the
+    // initial extend_to period, re-extending the Circle entry ensures that
+    // stored nullifiers are preserved and cannot be bypassed.
+    let s = setup(5, 100);
+    let client = ContractClient::new(&s.env, &s.client_id);
+
+    for m in s.members.iter() {
+        client.fund(&s.circle_id, m);
+    }
+
+    let recipient = Address::generate(&s.env);
+    let nullifier_hash = real_nullifier_hash(&s.env);
+    let external_nullifier = real_external_nullifier_round0(&s.env);
+    let proof = real_valid_proof(&s.env);
+
+    client.claim(
+        &s.circle_id,
+        &recipient,
+        &nullifier_hash,
+        &external_nullifier,
+        &proof,
+    );
+
+    assert!(client.has_claimed(&s.circle_id, &nullifier_hash));
+
+    // Advance the ledger sequence past LEDGER_THRESHOLD.
+    s.env.ledger().with_mut(|l| {
+        l.sequence_number += LEDGER_THRESHOLD + 10;
+        l.timestamp += u64::from(LEDGER_THRESHOLD + 10) * 5;
+    });
+
+    // Re-funding for round 1 extends the Circle entry TTL.
+    let token_admin_client = token::StellarAssetClient::new(&s.env, &s.token);
+    for m in s.members.iter() {
+        token_admin_client.mint(m, &s.contribution);
+        client.fund(&s.circle_id, m);
+    }
+
+    // Verify nullifier fence is still intact after ledger advancement and Circle TTL extension.
+    assert!(client.has_claimed(&s.circle_id, &nullifier_hash));
+}
+
 // ---- Proptest: apply_fee rounding invariant ----
 //
 // For every (amount, fee_bps) pair in the valid domain, the split must be
